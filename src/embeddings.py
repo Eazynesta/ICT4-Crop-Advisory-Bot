@@ -1,4 +1,5 @@
 import os
+import time
 from dotenv import load_dotenv
 from langchain_openai import AzureOpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
@@ -10,6 +11,10 @@ load_dotenv()
 # Constants
 FAISS_INDEX_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "faiss_index")
 PDF_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "pdfs")
+
+# Batch settings to avoid rate limits
+BATCH_SIZE = 50  # Number of chunks per batch
+BATCH_DELAY = 5  # Seconds to wait between batches
 
 
 def get_embeddings():
@@ -24,21 +29,56 @@ def get_embeddings():
 
 def create_vector_store(chunks: list) -> FAISS:
     """
-    Create a FAISS vector store from document chunks.
+    Create a FAISS vector store from document chunks with batching to avoid rate limits.
     """
     print("Creating vector store...")
-    print(f"Embedding {len(chunks)} chunks (this may take a minute)...")
+    print(f"Embedding {len(chunks)} chunks in batches of {BATCH_SIZE}...")
     
     embeddings = get_embeddings()
     
-    vector_store = FAISS.from_documents(
-        documents=chunks,
-        embedding=embeddings,
-    )
+    vector_store = None
+    total_batches = (len(chunks) + BATCH_SIZE - 1) // BATCH_SIZE
+    
+    for i in range(0, len(chunks), BATCH_SIZE):
+        batch = chunks[i:i + BATCH_SIZE]
+        batch_num = (i // BATCH_SIZE) + 1
+        
+        print(f"  Processing batch {batch_num}/{total_batches} ({len(batch)} chunks)...")
+        
+        try:
+            if vector_store is None:
+                # Create initial vector store with first batch
+                vector_store = FAISS.from_documents(
+                    documents=batch,
+                    embedding=embeddings,
+                )
+            else:
+                # Add subsequent batches to existing store
+                vector_store.add_documents(batch)
+            
+            # Wait between batches to avoid rate limit
+            if i + BATCH_SIZE < len(chunks):
+                print(f"    Waiting {BATCH_DELAY}s to avoid rate limit...")
+                time.sleep(BATCH_DELAY)
+                
+        except Exception as e:
+            if "429" in str(e) or "RateLimitError" in str(type(e).__name__):
+                print(f"    Rate limited! Waiting 60s before retry...")
+                time.sleep(60)
+                # Retry this batch
+                if vector_store is None:
+                    vector_store = FAISS.from_documents(
+                        documents=batch,
+                        embedding=embeddings,
+                    )
+                else:
+                    vector_store.add_documents(batch)
+            else:
+                raise e
     
     # Save to disk
     vector_store.save_local(FAISS_INDEX_DIR)
-    print(f"Vector store created and saved to {FAISS_INDEX_DIR}")
+    print(f"\nVector store created and saved to {FAISS_INDEX_DIR}")
     
     return vector_store
 
@@ -52,7 +92,7 @@ def load_vector_store() -> FAISS:
     vector_store = FAISS.load_local(
         FAISS_INDEX_DIR, 
         embeddings,
-        allow_dangerous_deserialization=True  # Safe since we created the index ourselves
+        allow_dangerous_deserialization=True
     )
     
     print(f"Loaded vector store from {FAISS_INDEX_DIR}")
