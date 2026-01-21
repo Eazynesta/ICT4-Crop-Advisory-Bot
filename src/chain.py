@@ -10,6 +10,70 @@ from embeddings import load_vector_store
 load_dotenv()
 
 
+def format_chat_history(messages: list) -> str:
+    """Format chat history into a string for the prompt."""
+    if not messages:
+        return "No previous conversation."
+
+    formatted = []
+    for msg in messages:
+        role = "Farmer" if msg["role"] == "user" else "Advisor"
+        formatted.append(f"{role}: {msg['content']}")
+
+    return "\n".join(formatted)
+
+
+def needs_retrieval(question: str, llm) -> bool:
+    """
+    Determine if a user's message requires document retrieval.
+    Returns True for agricultural questions, False for greetings/chitchat.
+    """
+    classifier_prompt = ChatPromptTemplate.from_template(
+        """You are a message classifier for an agricultural advisory chatbot.
+Determine if the following message requires retrieving information from agricultural documents.
+
+Messages that DO NOT need retrieval:
+- Greetings (hello, hi, good morning, etc.)
+- Farewells (bye, goodbye, thank you, etc.)
+- Simple chitchat or pleasantries
+- Questions about the bot itself (who are you, what can you do)
+
+Messages that DO need retrieval:
+- Questions about farming, crops, soil, pests, weather, livestock
+- Agricultural advice requests
+- Questions about specific farming practices or techniques
+
+Message: {question}
+
+Respond with ONLY "YES" if retrieval is needed, or "NO" if it's just chitchat/greeting."""
+    )
+
+    chain = classifier_prompt | llm | StrOutputParser()
+    result = chain.invoke({"question": question}).strip().upper()
+    return result == "YES"
+
+
+def get_chitchat_response(question: str, chat_history: list, llm) -> str:
+    """Generate a friendly response for greetings and chitchat."""
+    chitchat_prompt = ChatPromptTemplate.from_template(
+        """You are a friendly agricultural advisor for Kenyan farmers.
+Respond to this greeting or chitchat in a warm, helpful manner.
+Keep your response brief and friendly.
+If appropriate, let them know you're here to help with agricultural questions.
+
+Previous conversation:
+{chat_history}
+
+User message: {question}
+
+Response:"""
+    )
+
+    chain = chitchat_prompt | llm | StrOutputParser()
+    history_str = format_chat_history(chat_history) if chat_history else "No previous conversation."
+    return chain.invoke({"question": question, "chat_history": history_str})
+
+
 def get_llm():
     """Initialize Azure OpenAI Chat model."""
     return AzureChatOpenAI(
@@ -78,19 +142,6 @@ HELPFUL ANSWER:"""
     return rag_chain
 
 
-def format_chat_history(messages: list) -> str:
-    """Format chat history into a string for the prompt."""
-    if not messages:
-        return "No previous conversation."
-
-    formatted = []
-    for msg in messages:
-        role = "Farmer" if msg["role"] == "user" else "Advisor"
-        formatted.append(f"{role}: {msg['content']}")
-
-    return "\n".join(formatted)
-
-
 def create_rag_chain_with_sources():
     """Create a RAG chain that returns both the answer and source documents."""
 
@@ -133,6 +184,15 @@ HELPFUL ANSWER:"""
         """Retrieve documents and generate answer, returning both."""
         if chat_history is None:
             chat_history = []
+
+        # Check if retrieval is needed
+        if not needs_retrieval(question, llm):
+            # Handle greeting/chitchat without retrieval
+            answer = get_chitchat_response(question, chat_history, llm)
+            return {
+                "answer": answer,
+                "sources": []  # No sources for chitchat
+            }
 
         # Get the relevant documents
         docs = retriever.invoke(question)
