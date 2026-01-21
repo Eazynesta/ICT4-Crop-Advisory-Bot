@@ -34,13 +34,13 @@ def format_docs(docs):
 
 def create_rag_chain():
     """Create the RAG chain combining retrieval and generation."""
-    
+
     # Load vector store
     vector_store = load_vector_store()
     retriever = vector_store.as_retriever(search_kwargs={"k": 4})
-    
+
     # Create prompt template
-    template = """You are an expert agricultural advisor for Kenyan farmers. Your role is to provide 
+    template = """You are an expert agricultural advisor for Kenyan farmers. Your role is to provide
 accurate, practical advice based on the agricultural documents provided.
 
 IMPORTANT INSTRUCTIONS:
@@ -60,10 +60,10 @@ FARMER'S QUESTION: {question}
 HELPFUL ANSWER:"""
 
     prompt = ChatPromptTemplate.from_template(template)
-    
+
     # Get LLM
     llm = get_llm()
-    
+
     # Build the chain
     rag_chain = (
         {
@@ -74,8 +74,105 @@ HELPFUL ANSWER:"""
         | llm
         | StrOutputParser()
     )
-    
+
     return rag_chain
+
+
+def format_chat_history(messages: list) -> str:
+    """Format chat history into a string for the prompt."""
+    if not messages:
+        return "No previous conversation."
+
+    formatted = []
+    for msg in messages:
+        role = "Farmer" if msg["role"] == "user" else "Advisor"
+        formatted.append(f"{role}: {msg['content']}")
+
+    return "\n".join(formatted)
+
+
+def create_rag_chain_with_sources():
+    """Create a RAG chain that returns both the answer and source documents."""
+
+    # Load vector store
+    vector_store = load_vector_store()
+    retriever = vector_store.as_retriever(search_kwargs={"k": 4})
+
+    # Create prompt template with chat history
+    template = """You are an expert agricultural advisor for Kenyan farmers. Your role is to provide
+accurate, practical advice based on the agricultural documents provided.
+
+IMPORTANT INSTRUCTIONS:
+1. Base your answer ONLY on the provided context below
+2. If the context doesn't contain enough information to answer, say so clearly
+3. Always mention which source(s) your information comes from
+4. Give practical, actionable advice when possible
+5. Use simple language that farmers can understand
+6. Consider the conversation history when answering follow-up questions
+
+PREVIOUS CONVERSATION:
+{chat_history}
+
+---
+
+CONTEXT FROM AGRICULTURAL DOCUMENTS:
+{context}
+
+---
+
+FARMER'S QUESTION: {question}
+
+HELPFUL ANSWER:"""
+
+    prompt = ChatPromptTemplate.from_template(template)
+
+    # Get LLM
+    llm = get_llm()
+
+    def retrieve_and_answer(question: str, chat_history: list = None) -> dict:
+        """Retrieve documents and generate answer, returning both."""
+        if chat_history is None:
+            chat_history = []
+
+        # Get the relevant documents
+        docs = retriever.invoke(question)
+
+        # Format context for the prompt
+        context = format_docs(docs)
+
+        # Format chat history
+        history_str = format_chat_history(chat_history)
+
+        # Generate the answer
+        chain = prompt | llm | StrOutputParser()
+        answer = chain.invoke({
+            "context": context,
+            "question": question,
+            "chat_history": history_str
+        })
+
+        # Extract source information from documents
+        sources = []
+        for doc in docs:
+            page = doc.metadata.get('page', 'Unknown')
+            source = doc.metadata.get('source', 'Unknown')
+            filename = os.path.basename(source) if source != 'Unknown' else 'Unknown'
+            # Get a preview of the content (first 200 chars)
+            preview = doc.page_content[:200].replace('\n', ' ').strip()
+            if len(doc.page_content) > 200:
+                preview += "..."
+            sources.append({
+                "filename": filename,
+                "page": page,
+                "preview": preview
+            })
+
+        return {
+            "answer": answer,
+            "sources": sources
+        }
+
+    return retrieve_and_answer
 
 
 def ask(question: str) -> str:

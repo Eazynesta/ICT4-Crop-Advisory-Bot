@@ -5,7 +5,7 @@ import os
 # Add src to path
 sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
 
-from chain import create_rag_chain
+from chain import create_rag_chain_with_sources
 
 # Page configuration
 st.set_page_config(
@@ -43,15 +43,23 @@ st.divider()
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Initialize RAG chain (cached)
+# Initialize RAG chain with sources (cached)
 @st.cache_resource
 def get_chain():
-    return create_rag_chain()
+    return create_rag_chain_with_sources()
 
 # Display chat history
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
+        # Show sources if available (for assistant messages)
+        if message["role"] == "assistant" and "sources" in message:
+            with st.expander("📚 View Sources"):
+                for i, source in enumerate(message["sources"], 1):
+                    st.markdown(f"**Source {i}: {source['filename']}** (Page {source['page']})")
+                    st.caption(source["preview"])
+                    if i < len(message["sources"]):
+                        st.divider()
 
 # Chat input
 if prompt := st.chat_input("Ask a question about farming... (e.g., How do I control locusts?)"):
@@ -67,11 +75,27 @@ if prompt := st.chat_input("Ask a question about farming... (e.g., How do I cont
         with st.spinner("Searching agricultural documents..."):
             try:
                 chain = get_chain()
-                response = chain.invoke(prompt)
-                st.markdown(response)
-                
-                # Add assistant response to history
-                st.session_state.messages.append({"role": "assistant", "content": response})
+                # Pass chat history (excluding current message) for context
+                chat_history = st.session_state.messages[:-1]  # Exclude current user message
+                result = chain(prompt, chat_history)  # Returns dict with "answer" and "sources"
+
+                # Display the answer
+                st.markdown(result["answer"])
+
+                # Display sources in an expandable section
+                with st.expander("📚 View Sources"):
+                    for i, source in enumerate(result["sources"], 1):
+                        st.markdown(f"**Source {i}: {source['filename']}** (Page {source['page']})")
+                        st.caption(source["preview"])
+                        if i < len(result["sources"]):
+                            st.divider()
+
+                # Add assistant response to history (with sources)
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": result["answer"],
+                    "sources": result["sources"]
+                })
             except Exception as e:
                 error_msg = f"Sorry, I encountered an error: {str(e)}"
                 st.error(error_msg)
@@ -91,7 +115,7 @@ with st.sidebar:
     
     **Data Sources:**
     - Kenya Agricultural & Livestock Research Organization (KALRO)
-    - Emergency Locust Response Program (ELRP)
+    - FAO
     """)
     
     st.divider()
@@ -102,4 +126,3 @@ with st.sidebar:
         st.rerun()
     
     st.divider()
-    st.markdown("*Built for CS Capstone Project*")
